@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raiden Stage 1 - Pixel 強化版（含血條＋道具升級＋視差背景＋逐格爆炸＋尾焰＋CRT）</title>
+  <style>
+    html, body { margin: 0; background: black; color: white; height: 100%; overflow: hidden; }
+    canvas { display: block; margin: 0 auto; background: black; image-rendering: pixelated; }
+    #ui { position: absolute; top: 0; left: 0; width: 100%; text-align: center; font-family: monospace; }
+    #hud { position: absolute; bottom: 10px; left: 10px; font-family: monospace; color: #fff; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="480" height="640"></canvas>
+  <div id="ui">SCORE: <span id="score">0</span></div>
+  <div id="hud">HP:</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  
+// ====== Boss 圖片載入 ======
+const imgBoss = new Image();
+imgBoss.src = './boss.jpg'; // 圖片檔跟 html 同資料夾
+let imgBossReady = false;
+imgBoss.onload = () => imgBossReady = true;
+
+// ====== 背景音樂 ======
+const bgm = new Audio('./HEATS.mp3');
+bgm.loop = true;        // 讓它循環播放
+bgm.volume = 0.4;       // 音量可調 0~1
+
+
+// ====== 輸入 ======
+  const keys = {};
+  window.addEventListener('keydown', e => keys[e.key] = true);
+  window.addEventListener('keyup', e => keys[e.key] = false);
+
+  // ====== 工具 ======
+  const rand = (min, max) => Math.random() * (max - min) + min;
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+  let score = 0; const uiScore = document.getElementById('score');
+
+  // === 補血道具圖片（與 HTML 同資料夾） ===
+  const imgHeal = new Image();
+  let imgHealReady = false;
+  imgHeal.onload = () => { imgHealReady = true; };
+  imgHeal.src = './vocusheal.png';
+
+  // ====== Cut-in 圖片與狀態（原本） ======
+  const imgCutIn = new Image();
+  imgCutIn.src = './cutin.png';  // ← 這個檔名可換成你自己的
+  let imgCutInReady = false;
+  imgCutIn.onload = () => imgCutInReady = true;
+
+  let kills = 0;               // 累計擊墜數
+  let nextCutInAt = 150;       // 左側 cut-in 門檻（100、200、300…）
+  let cutInActive = false;     // 左側是否播放中
+  let cutInTimer = 0;          // 左側倒數
+  const CUTIN_DURATION = 2;  // 播放總長（秒）
+
+  // ====== Cut-in 2 圖片與狀態（新增：從右側滑入，門檻 150/250/350…） ======
+  const imgCutIn2 = new Image();
+  imgCutIn2.src = './cutin2.jpg';   // ← 換成你的第二張 cut-in 檔名
+  let imgCutIn2Ready = false;
+  imgCutIn2.onload = () => imgCutIn2Ready = true;
+
+  let nextCutInAtRight = 200;   // 右側 cut-in 門檻（與左側錯開 50 擊墜）
+  let cutInRightActive = false; // 右側是否播放中
+  let cutInRightTimer = 0;      // 右側倒數
+
+  // ====== 多層視差背景（海→陸→基地）＋海浪/燈光動畫 ======
+  let bgTime = 0;
+  function drawParallax(dt) {
+    bgTime += dt;
+    // 基底：深色海面
+    ctx.fillStyle = '#021';
+    ctx.fillRect(0, 0, W, H);
+
+    // 海浪層（前段 0~60s 比重高）
+    for (let y = 0; y < H / 10; y++) {
+      const wave = Math.sin((bgTime*2 + y * 0.35)) * 3;
+      ctx.fillStyle = '#033';
+      ctx.fillRect(0, (y * 10 + (bgTime * 40) % 10) + wave, W, 2);
+    }
+
+    // 陸地（中段 60~120s 漸顯）：簡單草地塊 + 小河
+    const landY = H - 200 + Math.sin(bgTime * 0.6) * 4;
+    ctx.fillStyle = '#030';
+    ctx.fillRect(0, landY, W, 200);
+    ctx.fillStyle = '#052';
+    for (let x = 0; x < W; x += 20) ctx.fillRect(x, landY, 10, 200);
+    ctx.fillStyle = '#124a6b';
+    ctx.fillRect(W*0.2, landY, 24, 200);
+
+    // 基地（後段 120~180s）：跑道與燈光
+    const baseY = H - 80 + Math.sin(bgTime) * 2;
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, baseY, W, 80);
+    // 跑道中心
+    const laneW = 140; const laneX = (W - laneW) / 2;
+    ctx.fillStyle = '#1a1a24';
+    ctx.fillRect(laneX, baseY, laneW, 80);
+    ctx.fillStyle = '#101018';
+    ctx.fillRect(laneX + 20, baseY, laneW - 40, 80);
+    // 跑道橫線
+    const step = 40; const o = (bgTime * 80) % step;
+    ctx.fillStyle = '#2a2a3a';
+    for (let y = -step; y < 80 + step; y += step) ctx.fillRect(laneX + 30, baseY + Math.floor(y + o), laneW - 60, 3);
+    // 跑道燈光（呼吸）
+    const blink = (Math.sin(bgTime * 8) + 1) / 2;
+    for (let y = 0; y < 80; y += 24) {
+      ctx.fillStyle = `rgba(80,180,255,${0.2 + 0.6 * ((y/24)%2 ? blink : 1 - blink)})`;
+      ctx.fillRect(laneX - 6, baseY + y, 3, 3);
+      ctx.fillRect(laneX + laneW + 3, baseY + y, 3, 3);
+    }
+  }
+
+  // ====== 玩家 ======
+  const player = {
+    x: W/2, y: H-60, w: 10, h: 10, speed: 200,
+    bullets: [], fireDelay: 0, power: 1, hp: 7, alive: true,
+    // === 第二武器狀態（新增） ===
+    power2: 0,         // 0=未解鎖；1~14
+    power2Prog: 0      // 每滿 3 顆武器道具 → power2 +1
+  };
+
+  function drawPlayer() {
+    ctx.fillStyle = '#0ff';
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y - player.h);
+    ctx.lineTo(player.x - player.w, player.y + player.h);
+    ctx.lineTo(player.x + player.w, player.y + player.h);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#088';
+    ctx.fillRect(player.x - player.w * 1.5, player.y, 6, 4);
+    ctx.fillRect(player.x + player.w * 0.8, player.y, 6, 4);
+  }
+
+  function drawHP() {
+    const total = 7, barWidth = 20;
+    for (let i = 0; i < total; i++) {
+      ctx.fillStyle = i < player.hp ? '#0f0' : '#400';
+      ctx.fillRect(20 + i * (barWidth + 4), H - 20, barWidth, 10);
+    }
+  }
+
+  // ====== 射擊（等級 1 ~ 14；尾焰使用「歷史節點」漸淡） ======
+  function shoot() {
+    if (player.fireDelay > 0) return;
+    player.fireDelay = 0.3;
+
+    // --- 第一武器：扇形彈（維持原行為） ---
+    const shots = clamp(player.power, 1, 14);
+let spreadTotal = Math.PI / 2.5; // 原本的最大扇形角度
+const center = (shots - 1) / 2;
+
+for (let i = 0; i < shots; i++) {
+  // === 新增：前 3 級都直線射 ===
+  let angle = 0;
+  if (player.power >= 4) {
+    const t = (shots === 1) ? 0 : (i - center) / center;
+    angle = t * (spreadTotal / 2);
+  }
+
+  const dx = Math.sin(angle) * 320;
+  const dy = -Math.cos(angle) * 400;
+
+  player.bullets.push({ x: player.x, y: player.y - 10, dx, dy, trail: [] });
+}
+
+    // --- 第二武器：紫色大彈（直線，傷害=3×，解鎖後同時發射） ---
+    if (player.power2 > 0) {
+  // 等級 = 顆數（最多 14 顆）
+  const lanes = clamp(player.power2, 1, 14);
+
+  // 每顆之間的水平距離；顆數愈多可視需要再降一點
+  const laneGap = 15;
+
+  for (let i = 0; i < lanes; i++) {
+    const offset = (i - (lanes - 1) / 2) * laneGap;
+    player.bullets.push({
+      x: player.x + offset,
+      y: player.y - 14,
+      dx: 0,
+      dy: -520,
+      trail: [],
+      dmg: 15,      // 3×原本子彈
+      type: 'big'   // 繪製用：紫色大彈
+    });
+  }
+}
+  }
+
+  function updateBullets(dt) {
+    player.fireDelay = Math.max(0, player.fireDelay - dt);
+    for (const b of player.bullets) {
+      // 記錄尾跡（big 彈尾跡稍長）
+      b.trail.push({ x: b.x, y: b.y });
+      const maxTrail = (b.type === 'big') ? 8 : 6;
+      if (b.trail.length > maxTrail) b.trail.shift();
+
+      b.x += b.dx * dt; 
+      b.y += b.dy * dt;
+    }
+    player.bullets = player.bullets.filter(b => b.y > -30 && b.x > -30 && b.x < W + 30);
+  }
+
+  function drawBullets() {
+    // 先畫尾跡：由舊到新，透明度遞減
+    for (const b of player.bullets) {
+      if (b.type === 'big') {
+        // 大彈：較長、較亮的紫色尾跡
+        let a = 0.6;
+        for (let i = 0; i < b.trail.length; i++) {
+          const t = b.trail[i];
+          ctx.globalAlpha = a;
+          ctx.fillStyle = '#d0a0ff'; // 淡紫尾光
+          ctx.fillRect(t.x - 2, t.y - 10, 4, 20);
+          a *= 0.7;
+        }
+      } else {
+        let a = 0.45;
+        for (let i = 0; i < b.trail.length; i++) {
+          const t = b.trail[i];
+          ctx.globalAlpha = a; ctx.fillStyle = '#ffec80';
+          ctx.fillRect(t.x - 1, t.y - 4, 2, 8);
+          a *= 0.7;
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // 畫本體
+    for (const b of player.bullets) {
+      if (b.type === 'big') {
+        // 紫色大彈：更清晰（粗、長），並加一層淡白光
+        ctx.fillStyle = '#a64dff'; // 主體紫
+        ctx.fillRect(b.x - 3, b.y - 12, 6, 24);
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(b.x - 2, b.y - 10, 4, 20);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(b.x - 1, b.y - 4, 2, 8);
+      }
+    }
+  }
+
+  // ====== 道具（白色圓球） ======
+  const items = [];
+  function spawnPowerUp(x, y) { items.push({ type: 'power', x, y, dy: 60 }); }
+  // === 補血道具產生器 ===
+  function spawnHeal(x, y) { items.push({ type: 'heal', x, y, dy: 60 }); }
+
+  function updateItems(dt) {
+    for (const it of items) it.y += it.dy * dt;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (Math.abs(it.x - player.x) < player.w && Math.abs(it.y - player.y) < player.h) {
+        if (it.type === 'power') {
+          // 先把第一武器升到 14；之後每 4 顆升第二武器 1 級（上限 14）
+          if (player.power < 14) {
+            player.power = clamp(player.power + 1, 1, 14);
+          } else {
+            if (player.power2 < 14) {
+              player.power2Prog++;
+              if (player.power2Prog >= 4) {
+                player.power2Prog = 0;
+                player.power2 = clamp(player.power2 + 1, 0, 14);
+              }
+            }
+          }
+        } else if (it.type === 'heal') {
+          player.hp = clamp(player.hp + 1, 0, 7); // 上限 7（對應血條繪製 total=7）
+        }
+        items.splice(i, 1);
+      } else if (it.y > H + 20) {
+        items.splice(i, 1);
+      }
+    }
+  }
+  function drawItems() {
+    for (const it of items) {
+      if (it.type === 'power') {
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(it.x, it.y, 5, 0, Math.PI*2); ctx.fill();
+      } else if (it.type === 'heal') {
+        // 用圖片顯示補血道具（圖片未載入時保留紅十字作為後備）
+        const size = 40;
+        if (imgHealReady) {
+          ctx.drawImage(
+            imgHeal,
+            Math.round(it.x - size / 2),
+            Math.round(it.y - size / 2),
+            size,
+            size
+          );
+        } else {
+          // 後備：紅色十字
+          ctx.fillStyle = '#f00';
+          ctx.fillRect(it.x - 3, it.y - 8, 6, 16);
+          ctx.fillRect(it.x - 8, it.y - 3, 16, 6);
+          ctx.globalAlpha = 0.15;
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(it.x - 4, it.y - 9, 8, 18);
+          ctx.fillRect(it.x - 9, it.y - 4, 18, 8);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+  }
+
+  // ====== 敵人 ======
+  const enemies = [];
+  function spawnEnemy(type, x, y, speed) {
+    let hp = 1, color = '#09f', w = 10, h = 10; // 將原本紅色 '#f00' 改為藍色 '#09f'
+    if (type === 'tank') { hp = 20; color = '#fa0'; }
+    if (type === 'boss') { hp = 8000; color = '#f44'; w = 70; h = 45; }
+    if (type === 'carrier') { hp = 15; color = '#a0f'; }
+    enemies.push({ type, x, y, w, h, hp, color, speed, bullets: [], delay: rand(1, 3), dead: false });
+  }
+
+  function drawEnemy(e) {
+    if (e.type === 'plane') {
+      ctx.fillStyle = e.color;
+      ctx.beginPath();
+      ctx.moveTo(e.x, e.y - e.h);
+      ctx.lineTo(e.x - e.w, e.y + e.h);
+      ctx.lineTo(e.x + e.w, e.y + e.h);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#a00'; ctx.fillRect(e.x - 2, e.y, 4, 4);
+    } else if (e.type === 'tank') {
+      ctx.fillStyle = e.color;
+      ctx.fillRect(e.x - e.w, e.y - e.h, e.w * 2, e.h * 2);
+      ctx.fillStyle = '#440'; ctx.fillRect(e.x - 2, e.y - 8, 4, 8);
+    } else if (e.type === 'boss') {
+  if (imgBossReady) {
+    const sizeW = 140; // Boss 圖片寬
+    const sizeH = 90;  // Boss 圖片高
+    ctx.drawImage(imgBoss, e.x - sizeW / 2, e.y - sizeH / 2, sizeW, sizeH);
+  } else {
+    // 原本的圖形作為後備顯示
+    ctx.fillStyle = e.color;
+    ctx.fillRect(e.x - 40, e.y - 20, 80, 40);
+    ctx.fillStyle = '#700';
+    ctx.fillRect(e.x - 30, e.y - 15, 20, 10);
+    ctx.fillRect(e.x + 10, e.y - 15, 20, 10);
+  }
+    } else if (e.type === 'carrier') {
+      ctx.fillStyle = '#a0f';
+      ctx.beginPath();
+      ctx.moveTo(e.x, e.y - e.h);
+      ctx.lineTo(e.x + e.w, e.y);
+      ctx.lineTo(e.x, e.y + e.h);
+      ctx.lineTo(e.x - e.w, e.y);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  function updateEnemies(dt) {
+    for (const e of enemies) {
+      if (e.type !== 'boss') {
+  e.y += e.speed * dt;
+} else {
+  // 先往下移動到定點 120
+  e.y = Math.min(e.y + dt * 40, 120);
+
+  // 抵達後才開始巡航位移（微幅、緩慢）
+  if (e.y >= 120) {
+    if (e.baseX == null) e.baseX = e.x; // 記錄出場基準 X
+    if (e.t == null) e.t = 0;
+    e.t += dt;
+
+    // 水平左右小幅擺動
+    const ampX = 40;    // 振幅（像素）→ 想更大就加大
+    const speedX = 0.6; // 速度（弧度/秒）→ 想更慢就調小
+    e.x = clamp(e.baseX + Math.sin(e.t * speedX) * ampX, 40, W - 40);
+
+    // 垂直微微呼吸（可選，不想要可註解掉下面兩行）
+    const ampY = 6;     // 垂直振幅
+    const speedY = 0.9; // 垂直速度
+    e.y = 120 + Math.sin(e.t * speedY) * ampY;
+  }
+}
+      e.delay -= dt;
+      if (e.type === 'boss' && e.delay < 0) {
+        e.delay = 0.8;
+        for (let i = -3; i <= 3; i++) e.bullets.push({ x: e.x, y: e.y + 20, dx: i * 60, dy: 200 });
+      } else if (e.type !== 'carrier' && Math.random() < 0.005) {
+        e.bullets.push({ x: e.x, y: e.y + 10, dx: 0, dy: 150 });
+      }
+      for (const b of e.bullets) { b.x += b.dx * dt; b.y += b.dy * dt; }
+      e.bullets = e.bullets.filter(b => b.y < H + 20 && b.x > -20 && b.x < W + 20);
+    }
+  }
+
+  function drawEnemies() {
+    for (const e of enemies) {
+      drawEnemy(e);
+      ctx.fillStyle = '#faa';
+      for (const b of e.bullets) ctx.fillRect(b.x - 2, b.y - 2, 4, 4);
+    }
+  }
+
+  // ====== 逐格爆炸（程式生成；簡單粒子） ======
+  const explosions = [];
+  function spawnExplosion(x, y, color = '#f80') {
+    for (let i = 0; i < 20; i++) {
+      explosions.push({ x, y, dx: rand(-100, 100), dy: rand(-100, 100), life: 1, color });
+    }
+  }
+  function updateExplosions(dt) {
+    for (const ex of explosions) { ex.x += ex.dx * dt; ex.y += ex.dy * dt; ex.life -= dt; }
+    for (let i = explosions.length - 1; i >= 0; i--) if (explosions[i].life <= 0) explosions.splice(i, 1);
+  }
+  function drawExplosions() {
+    for (const ex of explosions) { const a = Math.max(0, ex.life); ctx.globalAlpha = a; ctx.fillStyle = ex.color; ctx.fillRect(ex.x, ex.y, 2, 2); }
+    ctx.globalAlpha = 1;
+  }
+
+  // ====== Cut-in 更新與繪製（含第二張，新增） ======
+  function updateCutIn(dt) {
+    // 左側
+    if (cutInActive) {
+      cutInTimer -= dt;
+      if (cutInTimer <= 0) {
+        cutInActive = false;
+        cutInTimer = 0;
+      }
+    }
+    // 右側（新增）
+    if (cutInRightActive) {
+      cutInRightTimer -= dt;
+      if (cutInRightTimer <= 0) {
+        cutInRightActive = false;
+        cutInRightTimer = 0;
+      }
+    }
+  }
+
+  function drawCutIn() {
+    if (!cutInActive || !imgCutInReady) return;
+
+    const t = CUTIN_DURATION - cutInTimer;  // 已經播放的時間
+    const inDur = 0.5, holdDur = 1.2, outDur = 0.7;
+
+    // 尺寸（可視需要調整）
+    const targetH = 320;
+    const ratio = imgCutIn.naturalWidth ? (imgCutIn.naturalWidth / imgCutIn.naturalHeight) : 1.8;
+    const targetW = Math.round(targetH * ratio);
+    const y = 40;
+
+    // 進場滑入（左 → 右）
+    let x;
+    if (t <= inDur) {
+      const p = t / inDur;
+      const ease = 1 - Math.pow(1 - p, 3); // easeOutCubic
+      x = -targetW + ease * (20 + targetW);
+    } else {
+      x = 20;
+    }
+
+    // 透明度
+    let alpha = 1;
+    if (t <= inDur) {
+      alpha = 0.3 + 0.7 * (t / inDur);
+    } else if (t > inDur + holdDur) {
+      const p = (t - inDur - holdDur) / outDur;
+      alpha = 1 - p;
+    }
+
+    // 半透明遮罩
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.6, alpha * 0.6);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // 圖片
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(imgCutIn, Math.round(x), Math.round(y), targetW, targetH);
+    ctx.restore();
+  }
+
+  // ====== 第二張 cut-in（從右側滑入，新增） ======
+  function drawCutInRight() {
+    if (!cutInRightActive || !imgCutIn2Ready) return;
+
+    const t = CUTIN_DURATION - cutInRightTimer;  // 已播放時間
+    const inDur = 0.5, holdDur = 1.2, outDur = 0.7;
+
+    // 尺寸與位置（與左側一致）
+    const targetH = 320;
+    const ratio = imgCutIn2.naturalWidth ? (imgCutIn2.naturalWidth / imgCutIn2.naturalHeight) : 1.8;
+    const targetW = Math.round(targetH * ratio);
+    const y = 40;
+
+    // 從右邊滑入：停在右側內縮 20px
+    let x;
+    const targetX = W - targetW - 20;
+    if (t <= inDur) {
+      const p = t / inDur;                 // 0→1
+      const ease = 1 - Math.pow(1 - p, 3); // easeOutCubic
+      x = W + 10 - ease * (targetW + 30);  // 由螢幕外右側滑入到 targetX
+    } else {
+      x = targetX;
+    }
+
+    // 透明度：進場/退場淡化
+    let alpha = 1;
+    if (t <= inDur) {
+      alpha = 0.3 + 0.7 * (t / inDur);
+    } else if (t > inDur + holdDur) {
+      const p = (t - inDur - holdDur) / outDur; // 0→1
+      alpha = 1 - p;
+    }
+
+    // 半透明遮罩
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.6, alpha * 0.6);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // 圖片本體
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(imgCutIn2, Math.round(x), Math.round(y), targetW, targetH);
+    ctx.restore();
+  }
+
+  // ====== 碰撞 ======
+  function checkCollisions() {
+    // 玩家子彈打敵人
+    for (const e of enemies) {
+      for (const b of player.bullets) {
+        if (Math.abs(b.x - e.x) < e.w && Math.abs(b.y - e.y) < e.h) {
+          e.hp -= (b.dmg || 5);  // ← 依照子彈的 dmg 扣血（spread=5；big=15）
+          b.y = -9999;
+          if (e.hp <= 0 && !e.dead) {
+            e.dead = true;
+            score += (e.type === 'boss') ? 10000 : 100; uiScore.textContent = score;
+            if (e.type === 'carrier') spawnPowerUp(e.x, e.y);
+            spawnExplosion(e.x, e.y);
+
+            // ====== 擊墜數統計與 cut-in 觸發 ======
+            kills++;
+            // 左側：100/200/300…
+            if (kills >= nextCutInAt && !cutInActive) {
+              cutInActive = true;
+              cutInTimer = CUTIN_DURATION;
+              nextCutInAt += 100;
+            }
+            // 右側：150/250/350…（與左側錯開 50）
+            if (kills >= nextCutInAtRight && !cutInRightActive) {
+              cutInRightActive = true;
+              cutInRightTimer = CUTIN_DURATION;
+              nextCutInAtRight += 100;
+            }
+          }
+        }
+      }
+    }
+    // 敵彈/撞擊到玩家
+    for (const e of enemies) {
+      for (const b of e.bullets) {
+        if (Math.abs(b.x - player.x) < player.w && Math.abs(b.y - player.y) < player.h) {
+          b.y = 9999; player.hp -= 1; if (player.hp <= 0) player.alive = false; spawnExplosion(player.x, player.y, '#0ff');
+        }
+      }
+      if (Math.abs(e.x - player.x) < player.w + e.w && Math.abs(e.y - player.y) < player.h + e.h) {
+        e.dead = true; player.hp -= 1; if (player.hp <= 0) player.alive = false; spawnExplosion(e.x, e.y);
+      }
+    }
+    // 清理死亡與越界
+    for (let i = enemies.length - 1; i >= 0; i--) if (enemies[i].dead || enemies[i].y > H + 40) enemies.splice(i, 1);
+  }
+
+  // ====== 關卡腳本（延長至 ~150s） ======
+  let time = 0, bossSpawned = false, missionComplete = false;
+  function script(dt) {
+    time += dt;
+    // 0~30 海域
+    if (time < 30 && Math.random() < 0.06) spawnEnemy('plane', rand(50, W - 50), -10, rand(40, 60));
+    if (time < 30 && Math.random() < 0.015) spawnEnemy('tank', rand(60, W - 60), -10, rand(20, 35));
+    if (time > 5 && time < 20 && Math.random() < 0.01) spawnEnemy('carrier', rand(60, W - 60), -12, rand(35, 55));
+    // 30~90 陸地
+    if (time > 30 && time < 90 && Math.random() < 0.08) spawnEnemy('tank', rand(60, W - 60), -10, rand(25, 40));
+    if (time > 30 && time < 90 && Math.random() < 0.03) spawnEnemy('plane', rand(50, W - 50), -10, rand(40, 60));
+    if (time > 40 && time < 90 && Math.random() < 0.005) spawnEnemy('carrier', rand(60, W - 60), -12, rand(35, 55));
+    // 90~120 基地外圍
+    if (time > 90 && time < 150 && Math.random() < 0.2) spawnEnemy('plane', rand(40, W - 40), -10, rand(45, 70));
+    if (time > 90 && time < 150 && Math.random() < 0.1) spawnEnemy('tank', rand(50, W - 50), -10, rand(30, 45));
+    if (time > 95 && time < 150 && Math.random() < 0.005) spawnEnemy('carrier', rand(60, W - 60), -12, rand(35, 55));
+    // 少量隨機補血掉落（全時段，低機率避免破壞難度）
+    if (time > 8 && Math.random() < 0.0025) spawnHeal(rand(30, W - 30), -12);
+    // Boss 於 ~150 秒登場
+    if (time > 150 && !bossSpawned) { spawnEnemy('boss', W/2, -60, 20); bossSpawned = true; }
+  }
+
+  // ====== 螢幕 CRT 濾鏡（加上容錯） ======
+  function postFX(now) {
+    try {
+      const img = ctx.getImageData(0, 0, W, H);
+      const d = img.data;
+      for (let y = 0; y < H; y++) {
+        const line = (y % 2 === 0) ? 0.9 : 1.0; // 掃描線
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          d[i]   = (d[i]   * line) | 0;
+          d[i+1] = (d[i+1] * line) | 0;
+          d[i+2] = (d[i+2] * line) | 0;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    } catch (e) {
+      // 若因 tainted canvas 或其他原因導致 getImageData 失敗，跳過該幀像素處理即可
+      // console.warn('postFX skipped:', e);
+    }
+    // 微亮度波動疊加（原行為）
+    ctx.globalAlpha = 0.05 + 0.05 * Math.sin(now * 0.005);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  // ====== 主循環 ======
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+    ctx.clearRect(0, 0, W, H);
+
+    if (!player.alive) { ctx.fillStyle = '#fff'; ctx.font = '20px monospace'; ctx.fillText('GAME OVER', W/2 - 50, H/2); return; }
+    if (missionComplete) { ctx.fillStyle = '#0f0'; ctx.font = '20px monospace'; ctx.fillText('MISSION COMPLETE!', W/2 - 100, H/2); return; }
+
+    // 背景（取代原 drawBackground）
+    drawParallax(dt);
+
+    // 移動
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) player.x -= player.speed * dt;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) player.x += player.speed * dt;
+    if (keys['ArrowUp'] || keys['w'] || keys['W']) player.y -= player.speed * dt;
+    if (keys['ArrowDown'] || keys['s'] || keys['S']) player.y += player.speed * dt;
+    player.x = clamp(player.x, 10, W - 10); player.y = clamp(player.y, 10, H - 10);
+
+    if (keys[' '] || keys['Spacebar']) shoot();
+
+    updateBullets(dt);
+    updateEnemies(dt);
+    updateItems(dt);
+    updateExplosions(dt);
+    updateCutIn(dt); // 更新左右 cut-in 計時
+    checkCollisions();
+
+    if (bossSpawned && enemies.length === 0) missionComplete = true;
+
+    drawPlayer();
+    drawBullets();
+    drawEnemies();
+    drawItems();
+    drawExplosions();
+    drawHP();
+
+    script(dt);
+    postFX(now);
+    drawCutIn();       // 左側 cut-in
+    drawCutInRight();  // 右側 cut-in（新增）
+
+    bgm.play().catch(()=>{}); // 靜音模式下忽略錯誤
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
